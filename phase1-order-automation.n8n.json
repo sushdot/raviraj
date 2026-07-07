@@ -1,0 +1,338 @@
+{
+  "name": "Raviraj Textiles - Phase 1 Order Automation",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "raviraj-order-paid",
+        "responseMode": "onReceived",
+        "responseData": "{\"received\":true}",
+        "options": {}
+      },
+      "id": "1-webhook",
+      "name": "Order Paid Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-1400, 300],
+      "webhookId": "raviraj-order-paid"
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            { "name": "orderId", "type": "string", "value": "={{ $json.body.orderId }}" },
+            { "name": "customerName", "type": "string", "value": "={{ $json.body.customer.name }}" },
+            { "name": "customerPhone", "type": "string", "value": "={{ $json.body.customer.phone }}" },
+            { "name": "customerEmail", "type": "string", "value": "={{ $json.body.customer.email }}" },
+            { "name": "address", "type": "string", "value": "={{ $json.body.customer.address }}" },
+            { "name": "pincode", "type": "string", "value": "={{ $json.body.customer.pincode }}" },
+            { "name": "amount", "type": "number", "value": "={{ $json.body.amount }}" },
+            { "name": "currency", "type": "string", "value": "={{ $json.body.currency }}" },
+            { "name": "items", "type": "array", "value": "={{ $json.body.items }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "2-normalize",
+      "name": "Normalize Order Data",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-1160, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.postalpincode.in/pincode/{{ $json.pincode }}",
+        "options": {}
+      },
+      "id": "3-pincode-lookup",
+      "name": "Lookup City/State from Pincode",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-920, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            { "name": "city", "type": "string", "value": "={{ $json[0]?.PostOffice?.[0]?.District ?? 'NA' }}" },
+            { "name": "state", "type": "string", "value": "={{ $json[0]?.PostOffice?.[0]?.State ?? 'Tamil Nadu' }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "4-attach-city-state",
+      "name": "Attach City/State",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-680, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v20.0/{{ $env.WHATSAPP_PHONE_NUMBER_ID }}/messages",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.WHATSAPP_ACCESS_TOKEN }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  \"messaging_product\": \"whatsapp\",\n  \"to\": $node['Normalize Order Data'].json.customerPhone,\n  \"type\": \"text\",\n  \"text\": {\n    \"body\": \"Hi \" + $node['Normalize Order Data'].json.customerName + \", your Raviraj Textiles order \" + $node['Normalize Order Data'].json.orderId + \" is confirmed! We'll send your tracking number as soon as it ships. Thank you for shopping with us.\"\n  }\n} }}",
+        "options": {}
+      },
+      "id": "5-whatsapp-confirm",
+      "name": "WhatsApp: Order Confirmation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-440, 180],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://invoice-generator.com",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.INVOICE_GENERATOR_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  \"from\": \"Raviraj Textiles\\n12/12 Pappapatty Katu Valu, Kadayampatty Road\\nElampillai, Salem, Tamil Nadu 637502\\nPh: +91 93456 73735\",\n  \"to\": $node['Normalize Order Data'].json.customerName + \"\\n\" + $node['Normalize Order Data'].json.address + \"\\nPIN: \" + $node['Normalize Order Data'].json.pincode,\n  \"number\": $node['Normalize Order Data'].json.orderId,\n  \"currency\": \"inr\",\n  \"items\": $node['Normalize Order Data'].json.items.map(i => ({ \"name\": i.name, \"quantity\": i.quantity, \"unit_cost\": i.price })),\n  \"notes\": \"Thank you for shopping with Raviraj Textiles!\"\n} }}",
+        "options": { "response": { "response": { "responseFormat": "file" } } }
+      },
+      "id": "6-generate-invoice",
+      "name": "Generate Invoice PDF",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-440, 340],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.resend.com/emails",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.RESEND_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  \"from\": \"Raviraj Textiles <orders@ravirajtextile.com>\",\n  \"to\": [ $node['Normalize Order Data'].json.customerEmail ],\n  \"subject\": \"Order Confirmed - \" + $node['Normalize Order Data'].json.orderId,\n  \"html\": \"<p>Hi \" + $node['Normalize Order Data'].json.customerName + \",</p><p>Your order <b>\" + $node['Normalize Order Data'].json.orderId + \"</b> is confirmed. Your invoice is attached. We'll email/WhatsApp your tracking number as soon as it ships.</p><p>Thank you for shopping with Raviraj Textiles!</p>\",\n  \"attachments\": [ { \"filename\": \"invoice-\" + $node['Normalize Order Data'].json.orderId + \".pdf\", \"content\": $binary.data.data } ]\n} }}",
+        "options": {}
+      },
+      "id": "7-email-confirm",
+      "name": "Email: Order Confirmation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-200, 340],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://apiv2.shiprocket.in/v1/external/auth/login",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [ { "name": "Content-Type", "value": "application/json" } ] },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"email\": $env.SHIPROCKET_EMAIL, \"password\": $env.SHIPROCKET_PASSWORD } }}",
+        "options": {}
+      },
+      "id": "8-shiprocket-auth",
+      "name": "Shiprocket: Auth",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [40, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://apiv2.shiprocket.in/v1/external/orders/create/adhoc",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $json.token }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  \"order_id\": $node['Normalize Order Data'].json.orderId,\n  \"order_date\": $now.toFormat('yyyy-LL-dd HH:mm'),\n  \"pickup_location\": $env.SHIPROCKET_PICKUP_LOCATION,\n  \"billing_customer_name\": $node['Normalize Order Data'].json.customerName,\n  \"billing_last_name\": \"\",\n  \"billing_address\": $node['Normalize Order Data'].json.address,\n  \"billing_city\": $node['Attach City/State'].json.city,\n  \"billing_pincode\": $node['Normalize Order Data'].json.pincode,\n  \"billing_state\": $node['Attach City/State'].json.state,\n  \"billing_country\": \"India\",\n  \"billing_email\": $node['Normalize Order Data'].json.customerEmail,\n  \"billing_phone\": $node['Normalize Order Data'].json.customerPhone,\n  \"shipping_is_billing\": true,\n  \"order_items\": $node['Normalize Order Data'].json.items.map(i => ({ \"name\": i.name, \"sku\": i.id, \"units\": i.quantity, \"selling_price\": i.price })),\n  \"payment_method\": \"Prepaid\",\n  \"sub_total\": $node['Normalize Order Data'].json.amount,\n  \"length\": Number($env.SHIPROCKET_PKG_LENGTH_CM || 30),\n  \"breadth\": Number($env.SHIPROCKET_PKG_BREADTH_CM || 25),\n  \"height\": Number($env.SHIPROCKET_PKG_HEIGHT_CM || 5),\n  \"weight\": ($node['Normalize Order Data'].json.items.reduce((s,i)=>s+i.quantity,0) * Number($env.SHIPROCKET_WEIGHT_PER_ITEM_KG || 0.5))\n} }}",
+        "options": {}
+      },
+      "id": "9-shiprocket-create-order",
+      "name": "Shiprocket: Create Order",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [280, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://apiv2.shiprocket.in/v1/external/courier/assign/awb",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $node['Shiprocket: Auth'].json.token }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"shipment_id\": $json.payload.shipment_id } }}",
+        "options": {}
+      },
+      "id": "10-shiprocket-assign-awb",
+      "name": "Shiprocket: Assign AWB",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [520, 300]
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            { "name": "awbCode", "type": "string", "value": "={{ $json.response.data.awb_code }}" },
+            { "name": "courierName", "type": "string", "value": "={{ $json.response.data.courier_name }}" },
+            { "name": "trackingUrl", "type": "string", "value": "=https://shiprocket.co/tracking/{{ $json.response.data.awb_code }}" },
+            { "name": "shiprocketOrderId", "type": "string", "value": "={{ $node['Shiprocket: Create Order'].json.order_id }}" },
+            { "name": "shiprocketShipmentId", "type": "string", "value": "={{ $node['Shiprocket: Create Order'].json.payload.shipment_id }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "11-extract-tracking",
+      "name": "Extract Tracking Info",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [760, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_URL }}/internal/fulfillment-update",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-internal-secret", "value": "={{ $env.INTERNAL_API_SECRET }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  \"orderId\": $node['Normalize Order Data'].json.orderId,\n  \"shiprocketOrderId\": $json.shiprocketOrderId,\n  \"shiprocketShipmentId\": $json.shiprocketShipmentId,\n  \"awbCode\": $json.awbCode,\n  \"courierName\": $json.courierName,\n  \"trackingUrl\": $json.trackingUrl\n} }}",
+        "options": {}
+      },
+      "id": "12-backend-fulfillment-update",
+      "name": "Backend: Update Order + Tracking",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1000, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_URL }}/internal/reduce-stock",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-internal-secret", "value": "={{ $env.INTERNAL_API_SECRET }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"items\": $node['Normalize Order Data'].json.items.map(i => ({ \"id\": i.id, \"qty\": i.quantity })) } }}",
+        "options": {}
+      },
+      "id": "13-backend-reduce-stock",
+      "name": "Backend: Reduce Stock",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1240, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v20.0/{{ $env.WHATSAPP_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.WHATSAPP_ACCESS_TOKEN }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  \"messaging_product\": \"whatsapp\",\n  \"to\": $node['Normalize Order Data'].json.customerPhone,\n  \"type\": \"text\",\n  \"text\": {\n    \"body\": \"Good news \" + $node['Normalize Order Data'].json.customerName + \"! Your order \" + $node['Normalize Order Data'].json.orderId + \" has shipped via \" + $json.courierName + \". Tracking number: \" + $json.awbCode + \". Track it here: \" + $json.trackingUrl\n  }\n} }}",
+        "options": {}
+      },
+      "id": "14-whatsapp-tracking",
+      "name": "WhatsApp: Tracking Update",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1480, 220],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.resend.com/emails",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.RESEND_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  \"from\": \"Raviraj Textiles <orders@ravirajtextile.com>\",\n  \"to\": [ $node['Normalize Order Data'].json.customerEmail ],\n  \"subject\": \"Your order \" + $node['Normalize Order Data'].json.orderId + \" has shipped!\",\n  \"html\": \"<p>Hi \" + $node['Normalize Order Data'].json.customerName + \",</p><p>Your order has shipped via \" + $json.courierName + \".</p><p>Tracking number: <b>\" + $json.awbCode + \"</b><br/>Track here: <a href='\" + $json.trackingUrl + \"'>\" + $json.trackingUrl + \"</a></p><p>Thank you for shopping with Raviraj Textiles!</p>\"\n} }}",
+        "options": {}
+      },
+      "id": "15-email-tracking",
+      "name": "Email: Tracking Update",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1480, 380],
+      "continueOnFail": true
+    }
+  ],
+  "connections": {
+    "Order Paid Webhook": { "main": [ [ { "node": "Normalize Order Data", "type": "main", "index": 0 } ] ] },
+    "Normalize Order Data": { "main": [ [ { "node": "Lookup City/State from Pincode", "type": "main", "index": 0 } ] ] },
+    "Lookup City/State from Pincode": { "main": [ [ { "node": "Attach City/State", "type": "main", "index": 0 } ] ] },
+    "Attach City/State": { "main": [ [
+      { "node": "WhatsApp: Order Confirmation", "type": "main", "index": 0 },
+      { "node": "Generate Invoice PDF", "type": "main", "index": 0 }
+    ] ] },
+    "Generate Invoice PDF": { "main": [ [ { "node": "Email: Order Confirmation", "type": "main", "index": 0 } ] ] },
+    "Email: Order Confirmation": { "main": [ [ { "node": "Shiprocket: Auth", "type": "main", "index": 0 } ] ] },
+    "WhatsApp: Order Confirmation": { "main": [ [ { "node": "Shiprocket: Auth", "type": "main", "index": 0 } ] ] },
+    "Shiprocket: Auth": { "main": [ [ { "node": "Shiprocket: Create Order", "type": "main", "index": 0 } ] ] },
+    "Shiprocket: Create Order": { "main": [ [ { "node": "Shiprocket: Assign AWB", "type": "main", "index": 0 } ] ] },
+    "Shiprocket: Assign AWB": { "main": [ [ { "node": "Extract Tracking Info", "type": "main", "index": 0 } ] ] },
+    "Extract Tracking Info": { "main": [ [ { "node": "Backend: Update Order + Tracking", "type": "main", "index": 0 } ] ] },
+    "Backend: Update Order + Tracking": { "main": [ [ { "node": "Backend: Reduce Stock", "type": "main", "index": 0 } ] ] },
+    "Backend: Reduce Stock": { "main": [ [
+      { "node": "WhatsApp: Tracking Update", "type": "main", "index": 0 },
+      { "node": "Email: Tracking Update", "type": "main", "index": 0 }
+    ] ] }
+  },
+  "settings": { "executionOrder": "v1" }
+}
