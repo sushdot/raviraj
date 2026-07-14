@@ -509,5 +509,156 @@ app.post("/internal/fulfillment-update", requireInternalSecret, async (req, res)
   }
 });
 
+// ---------------------------------------------------------------
+// Phase 2 — reporting & segmentation endpoints (called by the
+// "Raviraj Textiles - Phase 2 Reporting & Segmentation" n8n workflow).
+// Same shared-secret protection as the Phase 1 internal routes above.
+//
+// NOTE on "today": this uses the Render server's own clock (UTC on
+// Render by default), not IST. If your daily numbers look ~5.5 hours
+// off from what you'd expect for the Indian business day, that's why —
+// let me know if you want this pinned to IST instead.
+// ---------------------------------------------------------------
+
+// GET /internal/daily-summary
+// Returns today's order count, today's revenue (paid orders only), and
+// how many paid orders are still waiting to be shipped.
+app.get("/internal/daily-summary", requireInternalSecret, async (req, res) => {
+  try {
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const startOfDayIso = startOfDay.toISOString();
+
+    const { data: todaysPaidOrders, error: paidErr } = await supabase
+      .from(ORDERS_TABLE)
+      .select("amount")
+      .eq("status", "paid")
+      .gte("paid_at", startOfDayIso);
+
+    if (paidErr) {
+      console.error("daily-summary paid orders error:", paidErr);
+      return res.status(500).json({ error: "Could not load daily summary" });
+    }
+
+    const orderCount = todaysPaidOrders.length;
+    const revenue = todaysPaidOrders.reduce((sum, o) => sum + Number(o.amount || 0), 0);
+
+    const { count: pendingShipping, error: pendingErr } = await supabase
+      .from(ORDERS_TABLE)
+      .select("id", { count: "exact", head: true })
+      .eq("status", "paid");
+
+    if (pendingErr) {
+      console.error("daily-summary pending-shipping error:", pendingErr);
+      return res.status(500).json({ error: "Could not load daily summary" });
+    }
+
+    res.json({ orderCount, revenue, pendingShipping: pendingShipping ?? 0 });
+  } catch (err) {
+    console.error("daily-summary error:", err);
+    res.status(500).json({ error: "Could not load daily summary" });
+  }
+});
+
+// GET /internal/low-stock?threshold=5
+// Returns in-stock products at or below the given stock threshold.
+app.get("/internal/low-stock", requireInternalSecret, async (req, res) => {
+  try {
+    const threshold = Number(req.query.threshold) || 5;
+
+    const { data, error } = await supabase
+      .from("products")
+      .select("id, name, stock_count")
+      .lte("stock_count", threshold)
+      .order("stock_count", { ascending: true });
+
+    if (error) {
+      console.error("low-stock error:", error);
+      return res.status(500).json({ error: "Could not load low stock items" });
+    }
+
+    const items = data.map((p) => ({ id: p.id, name: p.name, stock: p.stock_count }));
+    res.json({ items });
+  } catch (err) {
+    console.error("low-stock error:", err);
+    res.status(500).json({ error: "Could not load low stock items" });
+  }
+});
+
+// GET /internal/customers-summary
+// There's no separate customers table — a "customer" here is identified
+// by phone number, aggregated across their orders. Only orders that
+// actually resulted in payment count toward orderCount/totalSpent
+// (created/failed/cancelled orders are excluded).
+app.get("/internal/customers-summary", requireInternalSecret, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from(ORDERS_TABLE)
+      .select("customer_phone, customer_name, amount, status")
+      .in("status", ["paid", "shipped", "delivered"]);
+
+    if (error) {
+      console.error("customers-summary error:", error);
+      return res.status(500).json({ error: "Could not load customers summary" });
+    }
+
+    const byPhone = new Map();
+    for (const order of data) {
+      const phone = order.customer_phone;
+      if (!phone) continue;
+      if (!byPhone.has(phone)) {
+        byPhone.set(phone, {
+          customerId: phone,
+          phone,
+          name: order.customer_name,
+          orderCount: 0,
+          totalSpent: 0,
+        });
+      }
+      const entry = byPhone.get(phone);
+      entry.orderCount += 1;
+      entry.totalSpent += Number(order.amount || 0);
+    }
+
+    res.json({ customers: Array.from(byPhone.values()) });
+  } catch (err) {
+    console.error("customers-summary error:", err);
+    res.status(500).json({ error: "Could not load customers summary" });
+  }
+});
+
+// POST /internal/update-customer-tag
+// Body: { customerId, tag }  — customerId is the customer's phone number.
+app.post("/internal/update-customer-tag", requireInternalSecret, async (req, res) => {
+  try {
+    const { customerId, tag } = req.body;
+    if (!customerId || !tag) {
+      return res.status(400).json({ error: "customerId and tag are required" });
+    }
+    if (!["first-time", "repeat", "high-value"].includes(tag)) {
+      return res.status(400).json({ error: "Invalid tag" });
+    }
+
+    const { data, error } = await supabase
+      .from("customer_tags")
+      .upsert(
+        { customer_phone: customerId, tag, updated_at: new Date().toISOString() },
+        { onConflict: "customer_phone" }
+      )
+      .select()
+      .single();
+
+    if (error) {
+      console.error("update-customer-tag error:", error);
+      return res.status(500).json({ error: "Could not update customer tag" });
+    }
+
+    res.json({ success: true, customerTag: data });
+  } catch (err) {
+    console.error("update-customer-tag error:", err);
+    res.status(500).json({ error: "Could not update customer tag" });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Raviraj Textiles backend running on port ${PORT}`));
