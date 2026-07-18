@@ -42,6 +42,7 @@ const Razorpay = require("razorpay");
 const crypto = require("crypto");
 const axios = require("axios");
 const { createClient } = require("@supabase/supabase-js");
+const Anthropic = require("@anthropic-ai/sdk");
 
 const app = express();
 app.use(cors());
@@ -61,8 +62,11 @@ const supabase = createClient(
   { auth: { persistSession: false } }
 );
 
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
 const ORDERS_TABLE = "orders";
 const WEBHOOK_FAILURES_TABLE = "webhook_failures";
+const PRODUCT_IMAGES_BUCKET = "product-images";
 
 // ---------------------------------------------------------------
 // Phase 1 — internal automation endpoints (called by n8n, never by
@@ -361,7 +365,7 @@ app.get("/api/products", async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("products")
-      .select("id, name, category, retail_price, wholesale_price, mrp, tag, swatch_class, in_stock")
+      .select("id, name, category, retail_price, wholesale_price, mrp, tag, swatch_class, in_stock, image_url, description, keywords")
       .eq("in_stock", true)
       .order("created_at", { ascending: false });
 
@@ -382,12 +386,123 @@ app.get("/api/products", async (req, res) => {
       tag: row.tag,
       cls: row.swatch_class,
       inStock: row.in_stock,
+      img: row.image_url || undefined,
+      description: row.description || "",
+      keywords: row.keywords || [],
     }));
 
     res.json(products);
   } catch (err) {
     console.error("api/products error:", err);
     res.status(500).json({ error: "Could not load catalogue" });
+  }
+});
+
+// ---------------------------------------------------------------
+// AI Product Upload — admin-only routes (protected by the same
+// shared secret as /internal/*). Called by admin-ai-upload.html.
+// ---------------------------------------------------------------
+
+// POST /api/ai-product-content
+// Sends a product photo to Claude and gets back a title, description,
+// keywords, and suggested category/tag as JSON. Runs server-side so the
+// Anthropic API key is never exposed to the browser.
+app.post("/api/ai-product-content", requireInternalSecret, async (req, res) => {
+  try {
+    const { image, mediaType } = req.body; // base64 string + e.g. "image/png"
+    if (!image || !mediaType) {
+      return res.status(400).json({ error: "Missing image or mediaType" });
+    }
+
+    const message = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 1000,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "image", source: { type: "base64", media_type: mediaType, data: image } },
+            {
+              type: "text",
+              text: `You are writing an ecommerce product listing for a saree sold by Raviraj Textiles, an Indian saree wholesaler/retailer based in Elampillai, Salem. Look at this photo and respond with ONLY a raw JSON object (no markdown fences, no preamble) with exactly these keys: "title" (a concise SEO-friendly product title, under 70 characters), "description" (2-3 sentences, warm and sales-friendly, mentioning fabric, occasion and styling), "keywords" (an array of 10-14 lowercase SEO keyword phrases), "suggestedCategory" (one of: cotton, wedding, silk, soft-silk, fancy, printed), "suggestedTag" (a short badge like "New Arrival", "Bestseller", "Bridal", or empty string if none fits).`,
+            },
+          ],
+        },
+      ],
+    });
+
+    const textBlock = message.content.map((b) => b.text || "").join("");
+    const clean = textBlock.replace(/```json|```/g, "").trim();
+    const result = JSON.parse(clean);
+
+    res.json(result);
+  } catch (err) {
+    console.error("AI product content error:", err);
+    res.status(500).json({ error: "Failed to generate product content" });
+  }
+});
+
+// POST /api/products
+// Creates a new product: uploads the (background-removed) photo to
+// Supabase Storage, then inserts the product row pointing at that photo.
+app.post("/api/products", requireInternalSecret, async (req, res) => {
+  try {
+    const {
+      name, cat, retail, wholesale, mrp, tag, inStock,
+      description, keywords, imageBase64, imageMediaType,
+    } = req.body;
+
+    if (!name || !cat) {
+      return res.status(400).json({ error: "Missing required product fields (name, cat)" });
+    }
+
+    let imageUrl = null;
+    if (imageBase64 && imageMediaType) {
+      const ext = imageMediaType.split("/")[1] || "png";
+      const fileName = `${crypto.randomUUID()}.${ext}`;
+      const buffer = Buffer.from(imageBase64, "base64");
+
+      const { error: uploadErr } = await supabase.storage
+        .from(PRODUCT_IMAGES_BUCKET)
+        .upload(fileName, buffer, { contentType: imageMediaType, upsert: false });
+
+      if (uploadErr) {
+        console.error("Product image upload error:", uploadErr);
+        return res.status(500).json({ error: "Failed to upload product image" });
+      }
+
+      const { data: publicUrlData } = supabase.storage
+        .from(PRODUCT_IMAGES_BUCKET)
+        .getPublicUrl(fileName);
+      imageUrl = publicUrlData.publicUrl;
+    }
+
+    const { data, error } = await supabase
+      .from("products")
+      .insert({
+        name,
+        category: cat,
+        retail_price: retail ?? 0,
+        wholesale_price: wholesale ?? 0,
+        mrp: mrp ?? 0,
+        tag: tag || null,
+        in_stock: inStock !== undefined ? Boolean(inStock) : true,
+        image_url: imageUrl,
+        description: description || null,
+        keywords: Array.isArray(keywords) ? keywords : null,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Create product error:", error);
+      return res.status(500).json({ error: "Failed to save product" });
+    }
+
+    res.status(201).json({ ok: true, product: data });
+  } catch (err) {
+    console.error("Create product error:", err);
+    res.status(500).json({ error: "Failed to save product" });
   }
 });
 
